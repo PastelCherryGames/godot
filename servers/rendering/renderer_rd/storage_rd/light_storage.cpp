@@ -685,7 +685,7 @@ void LightStorage::update_light_buffers(RenderDataRD *p_render_data, const Paged
 						float bias_scale = light_instance->shadow_transform[j].bias_scale * light_data.soft_shadow_scale;
 						light_data.shadow_bias[j] = light->param[RS::LIGHT_PARAM_SHADOW_BIAS] / 100.0 * bias_scale;
 						light_data.shadow_normal_bias[j] = light->param[RS::LIGHT_PARAM_SHADOW_NORMAL_BIAS] * light_instance->shadow_transform[j].shadow_texel_size;
-						light_data.shadow_transmittance_bias[j] = light->param[RS::LIGHT_PARAM_TRANSMITTANCE_BIAS] * bias_scale;
+						light_data.shadow_transmittance_bias[j] = light->param[RS::LIGHT_PARAM_TRANSMITTANCE_BIAS] / 100.0 * bias_scale;
 						light_data.shadow_z_range[j] = light_instance->shadow_transform[j].farplane;
 						light_data.shadow_range_begin[j] = light_instance->shadow_transform[j].range_begin;
 						RendererRD::MaterialStorage::store_camera(shadow_mtx, light_data.shadow_matrices[j]);
@@ -2025,7 +2025,7 @@ void LightStorage::shadow_atlas_set_size(RID p_atlas, int p_size, bool p_16_bits
 	for (int i = 0; i < 4; i++) {
 		//clear subdivisions
 		shadow_atlas->quadrants[i].shadows.clear();
-		shadow_atlas->quadrants[i].shadows.resize(int64_t(1) << int64_t(shadow_atlas->quadrants[i].subdivision));
+		shadow_atlas->quadrants[i].shadows.resize(int64_t(shadow_atlas->quadrants[i].subdivision * shadow_atlas->quadrants[i].subdivision));
 	}
 
 	//erase shadow atlas reference from lights

@@ -301,7 +301,7 @@ void MeshStorage::mesh_add_surface(RID p_mesh, const RS::SurfaceData &p_surface)
 			Vector<uint8_t> ir = new_surface.index_data;
 			wr = wf_indices.ptrw();
 
-			if (new_surface.vertex_count < (1 << 16)) {
+			if (new_surface.vertex_count <= 65536) {
 				// Read 16 bit indices.
 				const uint16_t *src_idx = (const uint16_t *)ir.ptr();
 				for (uint32_t i = 0; i + 5 < wf_index_count; i += 6) {
@@ -743,6 +743,7 @@ String MeshStorage::mesh_get_path(RID p_mesh) const {
 }
 
 void MeshStorage::mesh_set_shadow_mesh(RID p_mesh, RID p_shadow_mesh) {
+	ERR_FAIL_COND_MSG(p_mesh == p_shadow_mesh, "Cannot set a mesh as its own shadow mesh.");
 	Mesh *mesh = mesh_owner.get_or_null(p_mesh);
 	ERR_FAIL_NULL(mesh);
 
@@ -1936,6 +1937,11 @@ void MeshStorage::multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_b
 		glBindBuffer(GL_ARRAY_BUFFER, 0);
 
 	} else {
+		// If we have a data cache, just update it.
+		if (multimesh->data_cache.size()) {
+			multimesh->data_cache = p_buffer;
+		}
+
 		// Only Transform is being used, so we can upload directly.
 		ERR_FAIL_COND(p_buffer.size() != (multimesh->instances * (int)multimesh->stride_cache));
 		const float *r = p_buffer.ptr();
@@ -1947,16 +1953,12 @@ void MeshStorage::multimesh_set_buffer(RID p_multimesh, const Vector<float> &p_b
 	multimesh->buffer_set = true;
 
 	if (multimesh->data_cache.size() || multimesh->uses_colors || multimesh->uses_custom_data) {
-		//if we have a data cache, just update it
-		multimesh->data_cache = multimesh->data_cache;
-		{
-			//clear dirty since nothing will be dirty anymore
-			uint32_t data_cache_dirty_region_count = Math::division_round_up(multimesh->instances, MULTIMESH_DIRTY_REGION_SIZE);
-			for (uint32_t i = 0; i < data_cache_dirty_region_count; i++) {
-				multimesh->data_cache_dirty_regions[i] = false;
-			}
-			multimesh->data_cache_used_dirty_regions = 0;
+		// Clear dirty since nothing will be dirty anymore.
+		uint32_t data_cache_dirty_region_count = Math::division_round_up(multimesh->instances, MULTIMESH_DIRTY_REGION_SIZE);
+		for (uint32_t i = 0; i < data_cache_dirty_region_count; i++) {
+			multimesh->data_cache_dirty_regions[i] = false;
 		}
+		multimesh->data_cache_used_dirty_regions = 0;
 
 		_multimesh_mark_all_dirty(multimesh, false, true); //update AABB
 	} else if (multimesh->mesh.is_valid()) {

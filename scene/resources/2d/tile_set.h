@@ -38,8 +38,8 @@
 #include "scene/2d/light_occluder_2d.h"
 #include "scene/main/canvas_item.h"
 #include "scene/resources/2d/convex_polygon_shape_2d.h"
+#include "scene/resources/2d/navigation_polygon.h"
 #include "scene/resources/image_texture.h"
-#include "scene/resources/navigation_polygon.h"
 #include "scene/resources/packed_scene.h"
 #include "scene/resources/physics_material.h"
 
@@ -265,8 +265,8 @@ public:
 	class TerrainsPattern {
 		bool valid = false;
 		int terrain = -1;
-		int bits[TileSet::CELL_NEIGHBOR_MAX];
-		bool is_valid_bit[TileSet::CELL_NEIGHBOR_MAX];
+		int bits[TileSet::CELL_NEIGHBOR_MAX] = {};
+		bool is_valid_bit[TileSet::CELL_NEIGHBOR_MAX] = {};
 
 		int not_empty_terrains_count = 0;
 
@@ -763,6 +763,7 @@ public:
 	Vector2i get_atlas_grid_size() const;
 	Rect2i get_tile_texture_region(Vector2i p_atlas_coords, int p_frame = 0) const;
 	bool is_position_in_tile_texture_region(const Vector2i p_atlas_coords, int p_alternative_tile, Vector2 p_position) const;
+	bool is_rect_in_tile_texture_region(const Vector2i p_atlas_coords, int p_alternative_tile, Rect2 p_rect) const;
 
 	static int alternative_no_transform(int p_alternative_id);
 

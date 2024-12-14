@@ -212,17 +212,25 @@ static const char *android_perms[] = {
 
 static const char *MISMATCHED_VERSIONS_MESSAGE = "Android build version mismatch:\n| Template installed: %s\n| Requested version: %s\nPlease reinstall Android build template from 'Project' menu.";
 
-static const char *SPLASH_IMAGE_EXPORT_PATH = "res/drawable-nodpi/splash.png";
-static const char *LEGACY_BUILD_SPLASH_IMAGE_EXPORT_PATH = "res/drawable-nodpi-v4/splash.png";
-static const char *SPLASH_BG_COLOR_PATH = "res/drawable-nodpi/splash_bg_color.png";
-static const char *LEGACY_BUILD_SPLASH_BG_COLOR_PATH = "res/drawable-nodpi-v4/splash_bg_color.png";
-static const char *SPLASH_CONFIG_PATH = "res/drawable/splash_drawable.xml";
 static const char *GDEXTENSION_LIBS_PATH = "libs/gdextensionlibs.json";
+
+// This template string must always match the content of 'platform/android/java/lib/res/mipmap-anydpi-v26/icon.xml'.
+static const String ICON_XML_TEMPLATE =
+		"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+		"<adaptive-icon xmlns:android=\"http://schemas.android.com/apk/res/android\">\n"
+		"    <background android:drawable=\"@mipmap/icon_background\"/>\n"
+		"    <foreground android:drawable=\"@mipmap/icon_foreground\"/>\n"
+		"%s" // Placeholder for the optional monochrome tag.
+		"</adaptive-icon>";
+
+static const String ICON_XML_PATH = "res/mipmap-anydpi-v26/icon.xml";
+static const String THEMED_ICON_XML_PATH = "res/mipmap-anydpi-v26/themed_icon.xml";
 
 static const int icon_densities_count = 6;
 static const char *launcher_icon_option = PNAME("launcher_icons/main_192x192");
 static const char *launcher_adaptive_icon_foreground_option = PNAME("launcher_icons/adaptive_foreground_432x432");
 static const char *launcher_adaptive_icon_background_option = PNAME("launcher_icons/adaptive_background_432x432");
+static const char *launcher_adaptive_icon_monochrome_option = PNAME("launcher_icons/adaptive_monochrome_432x432");
 
 static const LauncherIcon launcher_icons[icon_densities_count] = {
 	{ "res/mipmap-xxxhdpi-v4/icon.png", 192 },
@@ -249,6 +257,15 @@ static const LauncherIcon launcher_adaptive_icon_backgrounds[icon_densities_coun
 	{ "res/mipmap-hdpi-v4/icon_background.png", 162 },
 	{ "res/mipmap-mdpi-v4/icon_background.png", 108 },
 	{ "res/mipmap/icon_background.png", 432 }
+};
+
+static const LauncherIcon launcher_adaptive_icon_monochromes[icon_densities_count] = {
+	{ "res/mipmap-xxxhdpi-v4/icon_monochrome.png", 432 },
+	{ "res/mipmap-xxhdpi-v4/icon_monochrome.png", 324 },
+	{ "res/mipmap-xhdpi-v4/icon_monochrome.png", 216 },
+	{ "res/mipmap-hdpi-v4/icon_monochrome.png", 162 },
+	{ "res/mipmap-mdpi-v4/icon_monochrome.png", 108 },
+	{ "res/mipmap/icon_monochrome.png", 432 }
 };
 
 static const int EXPORT_FORMAT_APK = 0;
@@ -295,7 +312,9 @@ void EditorExportPlatformAndroid::_check_for_changes_poll_thread(void *ud) {
 
 		// Check for devices updates
 		String adb = get_adb_path();
-		if (ea->has_runnable_preset.is_set() && FileAccess::exists(adb)) {
+		// adb.exe was locking the editor_doc_cache file on startup. Adding a check for is_editor_ready provides just enough time
+		// to regenerate the doc cache.
+		if (ea->has_runnable_preset.is_set() && FileAccess::exists(adb) && EditorNode::get_singleton()->is_editor_ready()) {
 			String devices;
 			List<String> args;
 			args.push_back("devices");
@@ -446,6 +465,7 @@ void EditorExportPlatformAndroid::_update_preset_status() {
 	} else {
 		has_runnable_preset.clear();
 	}
+	devices_changed.set();
 }
 #endif
 
@@ -816,11 +836,11 @@ Error EditorExportPlatformAndroid::copy_gradle_so(void *p_userdata, const Shared
 }
 
 bool EditorExportPlatformAndroid::_has_read_write_storage_permission(const Vector<String> &p_permissions) {
-	return p_permissions.find("android.permission.READ_EXTERNAL_STORAGE") != -1 || p_permissions.find("android.permission.WRITE_EXTERNAL_STORAGE") != -1;
+	return p_permissions.has("android.permission.READ_EXTERNAL_STORAGE") || p_permissions.has("android.permission.WRITE_EXTERNAL_STORAGE");
 }
 
 bool EditorExportPlatformAndroid::_has_manage_external_storage_permission(const Vector<String> &p_permissions) {
-	return p_permissions.find("android.permission.MANAGE_EXTERNAL_STORAGE") != -1;
+	return p_permissions.has("android.permission.MANAGE_EXTERNAL_STORAGE");
 }
 
 bool EditorExportPlatformAndroid::_uses_vulkan() {
@@ -831,12 +851,80 @@ bool EditorExportPlatformAndroid::_uses_vulkan() {
 
 void EditorExportPlatformAndroid::_notification(int p_what) {
 #ifndef ANDROID_ENABLED
-	if (p_what == NOTIFICATION_POSTINITIALIZE) {
-		if (EditorExport::get_singleton()) {
-			EditorExport::get_singleton()->connect_presets_runnable_updated(callable_mp(this, &EditorExportPlatformAndroid::_update_preset_status));
-		}
+	switch (p_what) {
+		case NOTIFICATION_POSTINITIALIZE: {
+			if (EditorExport::get_singleton()) {
+				EditorExport::get_singleton()->connect_presets_runnable_updated(callable_mp(this, &EditorExportPlatformAndroid::_update_preset_status));
+			}
+		} break;
+
+		case EditorSettings::NOTIFICATION_EDITOR_SETTINGS_CHANGED: {
+			if (EditorSettings::get_singleton()->check_changed_settings_in_group("export/android")) {
+				_create_editor_debug_keystore_if_needed();
+			}
+		} break;
 	}
 #endif
+}
+
+void EditorExportPlatformAndroid::_create_editor_debug_keystore_if_needed() {
+	// Check if we have a valid keytool path.
+	String keytool_path = get_keytool_path();
+	if (!FileAccess::exists(keytool_path)) {
+		return;
+	}
+
+	// Check if the current editor debug keystore exists.
+	String editor_debug_keystore = EDITOR_GET("export/android/debug_keystore");
+	if (FileAccess::exists(editor_debug_keystore)) {
+		return;
+	}
+
+	// Generate the debug keystore.
+	String keystore_path = EditorPaths::get_singleton()->get_debug_keystore_path();
+	String keystores_dir = keystore_path.get_base_dir();
+	if (!DirAccess::exists(keystores_dir)) {
+		Ref<DirAccess> dir_access = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+		Error err = dir_access->make_dir_recursive(keystores_dir);
+		if (err != OK) {
+			WARN_PRINT(TTR("Error creating keystores directory:") + "\n" + keystores_dir);
+			return;
+		}
+	}
+
+	if (!FileAccess::exists(keystore_path)) {
+		String output;
+		List<String> args;
+		args.push_back("-genkey");
+		args.push_back("-keystore");
+		args.push_back(keystore_path);
+		args.push_back("-storepass");
+		args.push_back("android");
+		args.push_back("-alias");
+		args.push_back(DEFAULT_ANDROID_KEYSTORE_DEBUG_USER);
+		args.push_back("-keypass");
+		args.push_back(DEFAULT_ANDROID_KEYSTORE_DEBUG_PASSWORD);
+		args.push_back("-keyalg");
+		args.push_back("RSA");
+		args.push_back("-keysize");
+		args.push_back("2048");
+		args.push_back("-validity");
+		args.push_back("10000");
+		args.push_back("-dname");
+		args.push_back("cn=Godot, ou=Godot Engine, o=Stichting Godot, c=NL");
+		Error error = OS::get_singleton()->execute(keytool_path, args, &output, nullptr, true);
+		print_verbose(output);
+		if (error != OK) {
+			WARN_PRINT("Error: Unable to create debug keystore");
+			return;
+		}
+	}
+
+	// Update the editor settings.
+	EditorSettings::get_singleton()->set("export/android/debug_keystore", keystore_path);
+	EditorSettings::get_singleton()->set("export/android/debug_keystore_user", DEFAULT_ANDROID_KEYSTORE_DEBUG_USER);
+	EditorSettings::get_singleton()->set("export/android/debug_keystore_pass", DEFAULT_ANDROID_KEYSTORE_DEBUG_PASSWORD);
+	print_verbose("Updated editor debug keystore to " + keystore_path);
 }
 
 void EditorExportPlatformAndroid::_get_permissions(const Ref<EditorExportPreset> &p_preset, bool p_give_internet, Vector<String> &r_permissions) {
@@ -856,7 +944,7 @@ void EditorExportPlatformAndroid::_get_permissions(const Ref<EditorExportPreset>
 		}
 	}
 	if (p_give_internet) {
-		if (r_permissions.find("android.permission.INTERNET") == -1) {
+		if (!r_permissions.has("android.permission.INTERNET")) {
 			r_permissions.push_back("android.permission.INTERNET");
 		}
 	}
@@ -1393,6 +1481,14 @@ void EditorExportPlatformAndroid::_fix_manifest(const Ref<EditorExportPreset> &p
 	p_manifest = ret;
 }
 
+String EditorExportPlatformAndroid::_get_keystore_path(const Ref<EditorExportPreset> &p_preset, bool p_debug) {
+	String keystore_preference = p_debug ? "keystore/debug" : "keystore/release";
+	String keystore_env_variable = p_debug ? ENV_ANDROID_KEYSTORE_DEBUG_PATH : ENV_ANDROID_KEYSTORE_RELEASE_PATH;
+	String keystore_path = p_preset->get_or_env(keystore_preference, keystore_env_variable);
+
+	return ProjectSettings::get_singleton()->globalize_path(keystore_path).simplify_path();
+}
+
 String EditorExportPlatformAndroid::_parse_string(const uint8_t *p_bytes, bool p_utf8) {
 	uint32_t offset = 0;
 	uint32_t len = 0;
@@ -1566,73 +1662,13 @@ void EditorExportPlatformAndroid::_process_launcher_icons(const String &p_file_n
 	}
 }
 
-String EditorExportPlatformAndroid::load_splash_refs(Ref<Image> &splash_image, Ref<Image> &splash_bg_color_image) {
-	bool scale_splash = GLOBAL_GET("application/boot_splash/fullsize");
-	bool apply_filter = GLOBAL_GET("application/boot_splash/use_filter");
-	bool show_splash_image = GLOBAL_GET("application/boot_splash/show_image");
-	String project_splash_path = GLOBAL_GET("application/boot_splash/image");
-
-	// Setup the splash bg color.
-	bool bg_color_valid = false;
-	Color bg_color = ProjectSettings::get_singleton()->get("application/boot_splash/bg_color", &bg_color_valid);
-	if (!bg_color_valid) {
-		bg_color = boot_splash_bg_color;
-	}
-
-	if (show_splash_image) {
-		if (!project_splash_path.is_empty()) {
-			splash_image.instantiate();
-			print_verbose("Loading splash image: " + project_splash_path);
-			const Error err = ImageLoader::load_image(project_splash_path, splash_image);
-			if (err) {
-				if (OS::get_singleton()->is_stdout_verbose()) {
-					print_error("- unable to load splash image from " + project_splash_path + " (" + itos(err) + ")");
-				}
-				splash_image.unref();
-			}
-		}
-	} else {
-		splash_image.instantiate();
-		splash_image->initialize_data(1, 1, false, Image::FORMAT_RGBA8);
-		splash_image->set_pixel(0, 0, bg_color);
-	}
-
-	if (splash_image.is_null()) {
-		// Use the default
-		print_verbose("Using default splash image.");
-		splash_image = Ref<Image>(memnew(Image(boot_splash_png)));
-	}
-
-	if (scale_splash) {
-		Size2 screen_size = Size2(GLOBAL_GET("display/window/size/viewport_width"), GLOBAL_GET("display/window/size/viewport_height"));
-		int width, height;
-		if (screen_size.width > screen_size.height) {
-			// scale horizontally
-			height = screen_size.height;
-			width = splash_image->get_width() * screen_size.height / splash_image->get_height();
-		} else {
-			// scale vertically
-			width = screen_size.width;
-			height = splash_image->get_height() * screen_size.width / splash_image->get_width();
-		}
-		splash_image->resize(width, height);
-	}
-
-	print_verbose("Creating splash background color image.");
-	splash_bg_color_image.instantiate();
-	splash_bg_color_image->initialize_data(splash_image->get_width(), splash_image->get_height(), false, splash_image->get_format());
-	splash_bg_color_image->fill(bg_color);
-
-	String processed_splash_config_xml = vformat(SPLASH_CONFIG_XML_CONTENT, bool_to_string(apply_filter));
-	return processed_splash_config_xml;
-}
-
-void EditorExportPlatformAndroid::load_icon_refs(const Ref<EditorExportPreset> &p_preset, Ref<Image> &icon, Ref<Image> &foreground, Ref<Image> &background) {
+void EditorExportPlatformAndroid::load_icon_refs(const Ref<EditorExportPreset> &p_preset, Ref<Image> &icon, Ref<Image> &foreground, Ref<Image> &background, Ref<Image> &monochrome) {
 	String project_icon_path = GLOBAL_GET("application/config/icon");
 
 	icon.instantiate();
 	foreground.instantiate();
 	background.instantiate();
+	monochrome.instantiate();
 
 	// Regular icon: user selection -> project icon -> default.
 	String path = static_cast<String>(p_preset->get(launcher_icon_option)).strip_edges();
@@ -1660,68 +1696,63 @@ void EditorExportPlatformAndroid::load_icon_refs(const Ref<EditorExportPreset> &
 		print_verbose("Loading adaptive background icon from " + path);
 		ImageLoader::load_image(path, background);
 	}
+
+	// Adaptive monochrome: user selection -> default.
+	path = static_cast<String>(p_preset->get(launcher_adaptive_icon_monochrome_option)).strip_edges();
+	if (!path.is_empty()) {
+		print_verbose("Loading adaptive monochrome icon from " + path);
+		ImageLoader::load_image(path, monochrome);
+	}
 }
 
 void EditorExportPlatformAndroid::_copy_icons_to_gradle_project(const Ref<EditorExportPreset> &p_preset,
-		const String &processed_splash_config_xml,
-		const Ref<Image> &splash_image,
-		const Ref<Image> &splash_bg_color_image,
-		const Ref<Image> &main_image,
-		const Ref<Image> &foreground,
-		const Ref<Image> &background) {
+		const Ref<Image> &p_main_image,
+		const Ref<Image> &p_foreground,
+		const Ref<Image> &p_background,
+		const Ref<Image> &p_monochrome) {
 	String gradle_build_dir = ExportTemplateManager::get_android_build_directory(p_preset);
 
-	// Store the splash configuration
-	if (!processed_splash_config_xml.is_empty()) {
-		print_verbose("Storing processed splash configuration: " + String("\n") + processed_splash_config_xml);
-		store_string_at_path(gradle_build_dir.path_join(SPLASH_CONFIG_PATH), processed_splash_config_xml);
-	}
-
-	// Store the splash image
-	if (splash_image.is_valid() && !splash_image->is_empty()) {
-		String splash_export_path = gradle_build_dir.path_join(SPLASH_IMAGE_EXPORT_PATH);
-		print_verbose("Storing splash image in " + splash_export_path);
-		Vector<uint8_t> data;
-		_load_image_data(splash_image, data);
-		store_file_at_path(splash_export_path, data);
-	}
-
-	// Store the splash bg color image
-	if (splash_bg_color_image.is_valid() && !splash_bg_color_image->is_empty()) {
-		String splash_bg_color_path = gradle_build_dir.path_join(SPLASH_BG_COLOR_PATH);
-		print_verbose("Storing splash background image in " + splash_bg_color_path);
-		Vector<uint8_t> data;
-		_load_image_data(splash_bg_color_image, data);
-		store_file_at_path(splash_bg_color_path, data);
-	}
+	String monochrome_tag = "";
 
 	// Prepare images to be resized for the icons. If some image ends up being uninitialized,
 	// the default image from the export template will be used.
 
 	for (int i = 0; i < icon_densities_count; ++i) {
-		if (main_image.is_valid() && !main_image->is_empty()) {
+		if (p_main_image.is_valid() && !p_main_image->is_empty()) {
 			print_verbose("Processing launcher icon for dimension " + itos(launcher_icons[i].dimensions) + " into " + launcher_icons[i].export_path);
 			Vector<uint8_t> data;
-			_process_launcher_icons(launcher_icons[i].export_path, main_image, launcher_icons[i].dimensions, data);
+			_process_launcher_icons(launcher_icons[i].export_path, p_main_image, launcher_icons[i].dimensions, data);
 			store_file_at_path(gradle_build_dir.path_join(launcher_icons[i].export_path), data);
 		}
 
-		if (foreground.is_valid() && !foreground->is_empty()) {
-			print_verbose("Processing launcher adaptive icon foreground for dimension " + itos(launcher_adaptive_icon_foregrounds[i].dimensions) + " into " + launcher_adaptive_icon_foregrounds[i].export_path);
+		if (p_foreground.is_valid() && !p_foreground->is_empty()) {
+			print_verbose("Processing launcher adaptive icon p_foreground for dimension " + itos(launcher_adaptive_icon_foregrounds[i].dimensions) + " into " + launcher_adaptive_icon_foregrounds[i].export_path);
 			Vector<uint8_t> data;
-			_process_launcher_icons(launcher_adaptive_icon_foregrounds[i].export_path, foreground,
+			_process_launcher_icons(launcher_adaptive_icon_foregrounds[i].export_path, p_foreground,
 					launcher_adaptive_icon_foregrounds[i].dimensions, data);
 			store_file_at_path(gradle_build_dir.path_join(launcher_adaptive_icon_foregrounds[i].export_path), data);
 		}
 
-		if (background.is_valid() && !background->is_empty()) {
-			print_verbose("Processing launcher adaptive icon background for dimension " + itos(launcher_adaptive_icon_backgrounds[i].dimensions) + " into " + launcher_adaptive_icon_backgrounds[i].export_path);
+		if (p_background.is_valid() && !p_background->is_empty()) {
+			print_verbose("Processing launcher adaptive icon p_background for dimension " + itos(launcher_adaptive_icon_backgrounds[i].dimensions) + " into " + launcher_adaptive_icon_backgrounds[i].export_path);
 			Vector<uint8_t> data;
-			_process_launcher_icons(launcher_adaptive_icon_backgrounds[i].export_path, background,
+			_process_launcher_icons(launcher_adaptive_icon_backgrounds[i].export_path, p_background,
 					launcher_adaptive_icon_backgrounds[i].dimensions, data);
 			store_file_at_path(gradle_build_dir.path_join(launcher_adaptive_icon_backgrounds[i].export_path), data);
 		}
+
+		if (p_monochrome.is_valid() && !p_monochrome->is_empty()) {
+			print_verbose("Processing launcher adaptive icon p_monochrome for dimension " + itos(launcher_adaptive_icon_monochromes[i].dimensions) + " into " + launcher_adaptive_icon_monochromes[i].export_path);
+			Vector<uint8_t> data;
+			_process_launcher_icons(launcher_adaptive_icon_monochromes[i].export_path, p_monochrome,
+					launcher_adaptive_icon_monochromes[i].dimensions, data);
+			store_file_at_path(gradle_build_dir.path_join(launcher_adaptive_icon_monochromes[i].export_path), data);
+			monochrome_tag = "    <monochrome android:drawable=\"@mipmap/icon_monochrome\"/>\n";
+		}
 	}
+
+	// Finalize the icon.xml by formatting the template with the optional monochrome tag.
+	store_string_at_path(gradle_build_dir.path_join(ICON_XML_PATH), vformat(ICON_XML_TEMPLATE, monochrome_tag));
 }
 
 Vector<EditorExportPlatformAndroid::ABI> EditorExportPlatformAndroid::get_enabled_abis(const Ref<EditorExportPreset> &p_preset) {
@@ -1885,6 +1916,7 @@ void EditorExportPlatformAndroid::get_export_options(List<ExportOption> *r_optio
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, launcher_icon_option, PROPERTY_HINT_FILE, "*.png"), ""));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, launcher_adaptive_icon_foreground_option, PROPERTY_HINT_FILE, "*.png"), ""));
 	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, launcher_adaptive_icon_background_option, PROPERTY_HINT_FILE, "*.png"), ""));
+	r_options->push_back(ExportOption(PropertyInfo(Variant::STRING, launcher_adaptive_icon_monochrome_option, PROPERTY_HINT_FILE, "*.png"), ""));
 
 	r_options->push_back(ExportOption(PropertyInfo(Variant::BOOL, "graphics/opengl_debug"), false));
 
@@ -1937,7 +1969,7 @@ bool EditorExportPlatformAndroid::get_export_option_visibility(const EditorExpor
 	}
 	if (p_option == "custom_template/debug" || p_option == "custom_template/release") {
 		// The APK templates are ignored if Gradle build is enabled.
-		return advanced_options_enabled && !bool(p_preset->get("gradle_build/use_gradle_build"));
+		return !bool(p_preset->get("gradle_build/use_gradle_build"));
 	}
 
 	// Hide .NET embedding option (always enabled).
@@ -2202,6 +2234,15 @@ String EditorExportPlatformAndroid::get_java_path() {
 	return java_sdk_path.path_join("bin/java" + exe_ext);
 }
 
+String EditorExportPlatformAndroid::get_keytool_path() {
+	String exe_ext;
+	if (OS::get_singleton()->get_name() == "Windows") {
+		exe_ext = ".exe";
+	}
+	String java_sdk_path = EDITOR_GET("export/android/java_sdk_path");
+	return java_sdk_path.path_join("bin/keytool" + exe_ext);
+}
+
 String EditorExportPlatformAndroid::get_adb_path() {
 	String exe_ext;
 	if (OS::get_singleton()->get_name() == "Windows") {
@@ -2279,6 +2320,11 @@ String EditorExportPlatformAndroid::get_apksigner_path(int p_target_sdk, bool p_
 	bool failed = false;
 	String version_to_use;
 
+	String java_sdk_path = EDITOR_GET("export/android/java_sdk_path");
+	if (!java_sdk_path.is_empty()) {
+		OS::get_singleton()->set_environment("JAVA_HOME", java_sdk_path);
+	}
+
 	List<String> args;
 	args.push_back("--version");
 	String output;
@@ -2330,7 +2376,8 @@ static bool has_valid_keystore_credentials(String &r_error_str, const String &p_
 	args.push_back(p_password);
 	args.push_back("-alias");
 	args.push_back(p_username);
-	Error error = OS::get_singleton()->execute("keytool", args, &output, nullptr, true);
+	String keytool_path = EditorExportPlatformAndroid::get_keytool_path();
+	Error error = OS::get_singleton()->execute(keytool_path, args, &output, nullptr, true);
 	String keytool_error = "keytool error:";
 	bool valid = output.substr(0, keytool_error.length()) != keytool_error;
 
@@ -2347,10 +2394,10 @@ static bool has_valid_keystore_credentials(String &r_error_str, const String &p_
 }
 
 bool EditorExportPlatformAndroid::has_valid_username_and_password(const Ref<EditorExportPreset> &p_preset, String &r_error) {
-	String dk = p_preset->get_or_env("keystore/debug", ENV_ANDROID_KEYSTORE_DEBUG_PATH);
+	String dk = _get_keystore_path(p_preset, true);
 	String dk_user = p_preset->get_or_env("keystore/debug_user", ENV_ANDROID_KEYSTORE_DEBUG_USER);
 	String dk_password = p_preset->get_or_env("keystore/debug_password", ENV_ANDROID_KEYSTORE_DEBUG_PASS);
-	String rk = p_preset->get_or_env("keystore/release", ENV_ANDROID_KEYSTORE_RELEASE_PATH);
+	String rk = _get_keystore_path(p_preset, false);
 	String rk_user = p_preset->get_or_env("keystore/release_user", ENV_ANDROID_KEYSTORE_RELEASE_USER);
 	String rk_password = p_preset->get_or_env("keystore/release_password", ENV_ANDROID_KEYSTORE_RELEASE_PASS);
 
@@ -2449,7 +2496,7 @@ bool EditorExportPlatformAndroid::has_valid_export_configuration(const Ref<Edito
 
 	// Validate the rest of the export configuration.
 
-	String dk = p_preset->get_or_env("keystore/debug", ENV_ANDROID_KEYSTORE_DEBUG_PATH);
+	String dk = _get_keystore_path(p_preset, true);
 	String dk_user = p_preset->get_or_env("keystore/debug_user", ENV_ANDROID_KEYSTORE_DEBUG_USER);
 	String dk_password = p_preset->get_or_env("keystore/debug_password", ENV_ANDROID_KEYSTORE_DEBUG_PASS);
 
@@ -2467,7 +2514,7 @@ bool EditorExportPlatformAndroid::has_valid_export_configuration(const Ref<Edito
 		}
 	}
 
-	String rk = p_preset->get_or_env("keystore/release", ENV_ANDROID_KEYSTORE_RELEASE_PATH);
+	String rk = _get_keystore_path(p_preset, false);
 	String rk_user = p_preset->get_or_env("keystore/release_user", ENV_ANDROID_KEYSTORE_RELEASE_USER);
 	String rk_password = p_preset->get_or_env("keystore/release_password", ENV_ANDROID_KEYSTORE_RELEASE_PASS);
 
@@ -2631,7 +2678,7 @@ bool EditorExportPlatformAndroid::has_valid_project_configuration(const Ref<Edit
 	}
 
 	String package_name = p_preset->get("package/unique_name");
-	if (package_name.find("$genname") >= 0 && !is_project_name_valid()) {
+	if (package_name.contains("$genname") && !is_project_name_valid()) {
 		// Warning only, so don't override `valid`.
 		err += vformat(TTR("The project name does not meet the requirement for the package name format and will be updated to \"%s\". Please explicitly specify the package name if needed."), get_valid_basename());
 		err += "\n";
@@ -2724,7 +2771,7 @@ void EditorExportPlatformAndroid::get_command_line_flags(const Ref<EditorExportP
 Error EditorExportPlatformAndroid::sign_apk(const Ref<EditorExportPreset> &p_preset, bool p_debug, const String &export_path, EditorProgress &ep) {
 	int export_format = int(p_preset->get("gradle_build/export_format"));
 	String export_label = export_format == EXPORT_FORMAT_AAB ? "AAB" : "APK";
-	String release_keystore = p_preset->get_or_env("keystore/release", ENV_ANDROID_KEYSTORE_RELEASE_PATH);
+	String release_keystore = _get_keystore_path(p_preset, false);
 	String release_username = p_preset->get_or_env("keystore/release_user", ENV_ANDROID_KEYSTORE_RELEASE_USER);
 	String release_password = p_preset->get_or_env("keystore/release_password", ENV_ANDROID_KEYSTORE_RELEASE_PASS);
 	String target_sdk_version = p_preset->get("gradle_build/target_sdk");
@@ -2746,7 +2793,7 @@ Error EditorExportPlatformAndroid::sign_apk(const Ref<EditorExportPreset> &p_pre
 	String password;
 	String user;
 	if (p_debug) {
-		keystore = p_preset->get_or_env("keystore/debug", ENV_ANDROID_KEYSTORE_DEBUG_PATH);
+		keystore = _get_keystore_path(p_preset, true);
 		password = p_preset->get_or_env("keystore/debug_password", ENV_ANDROID_KEYSTORE_DEBUG_PASS);
 		user = p_preset->get_or_env("keystore/debug_user", ENV_ANDROID_KEYSTORE_DEBUG_USER);
 
@@ -2889,11 +2936,11 @@ void EditorExportPlatformAndroid::_remove_copied_libs(String p_gdextension_libs_
 
 String EditorExportPlatformAndroid::join_list(const List<String> &p_parts, const String &p_separator) {
 	String ret;
-	for (int i = 0; i < p_parts.size(); ++i) {
-		if (i > 0) {
+	for (List<String>::ConstIterator itr = p_parts.begin(); itr != p_parts.end(); ++itr) {
+		if (itr != p_parts.begin()) {
 			ret += p_separator;
 		}
-		ret += p_parts[i];
+		ret += *itr;
 	}
 	return ret;
 }
@@ -3008,15 +3055,12 @@ Error EditorExportPlatformAndroid::export_project_helper(const Ref<EditorExportP
 	print_verbose("- include filter: " + p_preset->get_include_filter());
 	print_verbose("- exclude filter: " + p_preset->get_exclude_filter());
 
-	Ref<Image> splash_image;
-	Ref<Image> splash_bg_color_image;
-	String processed_splash_config_xml = load_splash_refs(splash_image, splash_bg_color_image);
-
 	Ref<Image> main_image;
 	Ref<Image> foreground;
 	Ref<Image> background;
+	Ref<Image> monochrome;
 
-	load_icon_refs(p_preset, main_image, foreground, background);
+	load_icon_refs(p_preset, main_image, foreground, background, monochrome);
 
 	Vector<uint8_t> command_line_flags;
 	// Write command line flags into the command_line_flags variable.
@@ -3087,7 +3131,7 @@ Error EditorExportPlatformAndroid::export_project_helper(const Ref<EditorExportP
 			add_message(EXPORT_MESSAGE_ERROR, TTR("Export"), TTR("Unable to overwrite res/*.xml files with project name."));
 		}
 		// Copies the project icon files into the appropriate Gradle project directory.
-		_copy_icons_to_gradle_project(p_preset, processed_splash_config_xml, splash_image, splash_bg_color_image, main_image, foreground, background);
+		_copy_icons_to_gradle_project(p_preset, main_image, foreground, background, monochrome);
 		// Write an AndroidManifest.xml file into the Gradle project directory.
 		_write_tmp_manifest(p_preset, p_give_internet, p_debug);
 
@@ -3231,7 +3275,7 @@ Error EditorExportPlatformAndroid::export_project_helper(const Ref<EditorExportP
 
 		if (should_sign) {
 			if (p_debug) {
-				String debug_keystore = p_preset->get_or_env("keystore/debug", ENV_ANDROID_KEYSTORE_DEBUG_PATH);
+				String debug_keystore = _get_keystore_path(p_preset, true);
 				String debug_password = p_preset->get_or_env("keystore/debug_password", ENV_ANDROID_KEYSTORE_DEBUG_PASS);
 				String debug_user = p_preset->get_or_env("keystore/debug_user", ENV_ANDROID_KEYSTORE_DEBUG_USER);
 
@@ -3253,7 +3297,7 @@ Error EditorExportPlatformAndroid::export_project_helper(const Ref<EditorExportP
 				cmdline.push_back("-Pdebug_keystore_password=" + debug_password); // argument to specify the debug keystore password.
 			} else {
 				// Pass the release keystore info as well
-				String release_keystore = p_preset->get_or_env("keystore/release", ENV_ANDROID_KEYSTORE_RELEASE_PATH);
+				String release_keystore = _get_keystore_path(p_preset, false);
 				String release_username = p_preset->get_or_env("keystore/release_user", ENV_ANDROID_KEYSTORE_RELEASE_USER);
 				String release_password = p_preset->get_or_env("keystore/release_password", ENV_ANDROID_KEYSTORE_RELEASE_PASS);
 				if (release_keystore.is_relative_path()) {
@@ -3372,6 +3416,11 @@ Error EditorExportPlatformAndroid::export_project_helper(const Ref<EditorExportP
 	String apk_expansion_pkey = p_preset->get("apk_expansion/public_key");
 
 	Vector<ABI> invalid_abis(enabled_abis);
+
+	//To temporarily store icon xml data.
+	Vector<uint8_t> themed_icon_xml_data;
+	int icon_xml_compression_method = -1;
+
 	while (ret == UNZ_OK) {
 		//get filename
 		unz_file_info info;
@@ -3401,14 +3450,18 @@ Error EditorExportPlatformAndroid::export_project_helper(const Ref<EditorExportP
 			_fix_resources(p_preset, data);
 		}
 
-		// Process the splash image
-		if ((file == SPLASH_IMAGE_EXPORT_PATH || file == LEGACY_BUILD_SPLASH_IMAGE_EXPORT_PATH) && splash_image.is_valid() && !splash_image->is_empty()) {
-			_load_image_data(splash_image, data);
+		if (file == THEMED_ICON_XML_PATH) {
+			// Store themed_icon.xml data.
+			themed_icon_xml_data = data;
+			skip = true;
 		}
 
-		// Process the splash bg color image
-		if ((file == SPLASH_BG_COLOR_PATH || file == LEGACY_BUILD_SPLASH_BG_COLOR_PATH) && splash_bg_color_image.is_valid() && !splash_bg_color_image->is_empty()) {
-			_load_image_data(splash_bg_color_image, data);
+		if (file == ICON_XML_PATH) {
+			if (monochrome.is_valid() && !monochrome->is_empty()) {
+				// Defer processing of icon.xml until after themed_icon.xml is read.
+				icon_xml_compression_method = info.compression_method;
+				skip = true;
+			}
 		}
 
 		if (file.ends_with(".png") && file.contains("mipmap")) {
@@ -3426,6 +3479,11 @@ Error EditorExportPlatformAndroid::export_project_helper(const Ref<EditorExportP
 				if (background.is_valid() && !background->is_empty()) {
 					if (file == launcher_adaptive_icon_backgrounds[i].export_path) {
 						_process_launcher_icons(file, background, launcher_adaptive_icon_backgrounds[i].dimensions, data);
+					}
+				}
+				if (monochrome.is_valid() && !monochrome->is_empty()) {
+					if (file == launcher_adaptive_icon_monochromes[i].export_path) {
+						_process_launcher_icons(file, monochrome, launcher_adaptive_icon_monochromes[i].dimensions, data);
 					}
 				}
 			}
@@ -3473,6 +3531,28 @@ Error EditorExportPlatformAndroid::export_project_helper(const Ref<EditorExportP
 		}
 
 		ret = unzGoToNextFile(pkg);
+	}
+
+	// Process deferred icon.xml and replace it's data with themed_icon.xml.
+	if (monochrome.is_valid() && !monochrome->is_empty()) {
+		print_line("ADDING: " + ICON_XML_PATH + " (replacing with themed_icon.xml data)");
+
+		const bool uncompressed = icon_xml_compression_method == 0;
+		zip_fileinfo zipfi = get_zip_fileinfo();
+
+		zipOpenNewFileInZip(unaligned_apk,
+				ICON_XML_PATH.utf8().get_data(),
+				&zipfi,
+				nullptr,
+				0,
+				nullptr,
+				0,
+				nullptr,
+				uncompressed ? 0 : Z_DEFLATED,
+				Z_DEFAULT_COMPRESSION);
+
+		zipWriteInFileInZip(unaligned_apk, themed_icon_xml_data.ptr(), themed_icon_xml_data.size());
+		zipCloseFileInZip(unaligned_apk);
 	}
 
 	if (!invalid_abis.is_empty()) {
@@ -3647,6 +3727,7 @@ EditorExportPlatformAndroid::EditorExportPlatformAndroid() {
 		android_plugins_changed.set();
 #endif // DISABLE_DEPRECATED
 #ifndef ANDROID_ENABLED
+		_create_editor_debug_keystore_if_needed();
 		_update_preset_status();
 		check_for_changes_thread.start(_check_for_changes_poll_thread, this);
 #endif

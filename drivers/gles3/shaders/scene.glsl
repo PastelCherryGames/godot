@@ -583,6 +583,8 @@ void main() {
 
 #define SHADER_IS_SRGB true
 
+#define FLAGS_NON_UNIFORM_SCALE (1 << 4)
+
 /* Varyings */
 
 #if defined(COLOR_USED)
@@ -869,13 +871,15 @@ uniform lowp uint directional_shadow_index;
 
 #if !defined(ADDITIVE_OMNI)
 float sample_shadow(highp sampler2DShadow shadow, float shadow_pixel_size, vec4 pos) {
-	float avg = textureProj(shadow, pos);
+	// Use textureProjLod with LOD set to 0.0 over textureProj, as textureProj not working correctly on ANGLE with Metal backend.
+	// https://github.com/godotengine/godot/issues/93537
+	float avg = textureProjLod(shadow, pos, 0.0);
 #ifdef SHADOW_MODE_PCF_13
 	pos /= pos.w;
-	avg += textureProj(shadow, vec4(pos.xy + vec2(shadow_pixel_size * 2.0, 0.0), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(-shadow_pixel_size * 2.0, 0.0), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(0.0, shadow_pixel_size * 2.0), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(0.0, -shadow_pixel_size * 2.0), pos.zw));
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(shadow_pixel_size * 2.0, 0.0), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(-shadow_pixel_size * 2.0, 0.0), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(0.0, shadow_pixel_size * 2.0), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(0.0, -shadow_pixel_size * 2.0), pos.zw), 0.0);
 
 	// Early bail if distant samples are fully shaded (or none are shaded) to improve performance.
 	if (avg <= 0.000001) {
@@ -886,23 +890,23 @@ float sample_shadow(highp sampler2DShadow shadow, float shadow_pixel_size, vec4 
 		return 1.0;
 	}
 
-	avg += textureProj(shadow, vec4(pos.xy + vec2(shadow_pixel_size, 0.0), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, 0.0), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(0.0, shadow_pixel_size), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(0.0, -shadow_pixel_size), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(shadow_pixel_size, shadow_pixel_size), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, shadow_pixel_size), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(shadow_pixel_size, -shadow_pixel_size), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, -shadow_pixel_size), pos.zw));
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(shadow_pixel_size, 0.0), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, 0.0), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(0.0, shadow_pixel_size), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(0.0, -shadow_pixel_size), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(shadow_pixel_size, shadow_pixel_size), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, shadow_pixel_size), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(shadow_pixel_size, -shadow_pixel_size), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, -shadow_pixel_size), pos.zw), 0.0);
 	return avg * (1.0 / 13.0);
 #endif
 
 #ifdef SHADOW_MODE_PCF_5
 	pos /= pos.w;
-	avg += textureProj(shadow, vec4(pos.xy + vec2(shadow_pixel_size, 0.0), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, 0.0), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(0.0, shadow_pixel_size), pos.zw));
-	avg += textureProj(shadow, vec4(pos.xy + vec2(0.0, -shadow_pixel_size), pos.zw));
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(shadow_pixel_size, 0.0), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, 0.0), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(0.0, shadow_pixel_size), pos.zw), 0.0);
+	avg += textureProjLod(shadow, vec4(pos.xy + vec2(0.0, -shadow_pixel_size), pos.zw), 0.0);
 	return avg * (1.0 / 5.0);
 
 #endif
@@ -953,6 +957,7 @@ ivec2 multiview_uv(ivec2 uv) {
 
 uniform highp mat4 world_transform;
 uniform mediump float opaque_prepass_threshold;
+uniform highp uint model_flags;
 
 #if defined(RENDER_MATERIAL)
 layout(location = 0) out vec4 albedo_output_buffer;
@@ -1442,6 +1447,9 @@ void main() {
 	float clearcoat_roughness = 0.0;
 	float anisotropy = 0.0;
 	vec2 anisotropy_flow = vec2(1.0, 0.0);
+#ifdef PREMUL_ALPHA_USED
+	float premul_alpha = 1.0;
+#endif // PREMUL_ALPHA_USED
 #ifndef FOG_DISABLED
 	vec4 fog = vec4(0.0);
 #endif // !FOG_DISABLED
@@ -1511,9 +1519,33 @@ void main() {
 	float alpha_antialiasing_edge = 0.0;
 	vec2 alpha_texture_coordinate = vec2(0.0, 0.0);
 #endif // ALPHA_ANTIALIASING_EDGE_USED
+
+#ifdef LIGHT_VERTEX_USED
+	vec3 light_vertex = vertex;
+#endif //LIGHT_VERTEX_USED
+
+	highp mat3 model_normal_matrix;
+	if (bool(model_flags & uint(FLAGS_NON_UNIFORM_SCALE))) {
+		model_normal_matrix = transpose(inverse(mat3(model_matrix)));
+	} else {
+		model_normal_matrix = mat3(model_matrix);
+	}
+
 	{
 #CODE : FRAGMENT
 	}
+
+	// Keep albedo values in positive number range as negative values "wraparound" into positive numbers resulting in wrong colors
+	albedo = max(albedo, vec3(0.0));
+
+#ifdef LIGHT_VERTEX_USED
+	vertex = light_vertex;
+#ifdef USE_MULTIVIEW
+	view = -normalize(vertex - eye_offset);
+#else
+	view = -normalize(vertex);
+#endif //USE_MULTIVIEW
+#endif //LIGHT_VERTEX_USED
 
 #ifndef USE_SHADOW_TO_OPACITY
 
@@ -1521,6 +1553,7 @@ void main() {
 	if (alpha < alpha_scissor_threshold) {
 		discard;
 	}
+	alpha = 1.0;
 #else
 #ifdef MODE_RENDER_DEPTH
 #ifdef USE_OPAQUE_PREPASS
@@ -1705,16 +1738,10 @@ void main() {
 
 		vec3 n = normalize(lightmap_normal_xform * normal);
 
-		ambient_light += lm_light_l0 * 0.282095f;
-		ambient_light += lm_light_l1n1 * 0.32573 * n.y * lightmap_exposure_normalization;
-		ambient_light += lm_light_l1_0 * 0.32573 * n.z * lightmap_exposure_normalization;
-		ambient_light += lm_light_l1p1 * 0.32573 * n.x * lightmap_exposure_normalization;
-		if (metallic > 0.01) { // Since the more direct bounced light is lost, we can kind of fake it with this trick.
-			vec3 r = reflect(normalize(-vertex), normal);
-			specular_light += lm_light_l1n1 * 0.32573 * r.y * lightmap_exposure_normalization;
-			specular_light += lm_light_l1_0 * 0.32573 * r.z * lightmap_exposure_normalization;
-			specular_light += lm_light_l1p1 * 0.32573 * r.x * lightmap_exposure_normalization;
-		}
+		ambient_light += lm_light_l0 * lightmap_exposure_normalization;
+		ambient_light += lm_light_l1n1 * n.y * lightmap_exposure_normalization;
+		ambient_light += lm_light_l1_0 * n.z * lightmap_exposure_normalization;
+		ambient_light += lm_light_l1p1 * n.x * lightmap_exposure_normalization;
 #else
 		ambient_light += textureLod(lightmap_textures, uvw, 0.0).rgb * lightmap_exposure_normalization;
 #endif
@@ -1844,23 +1871,16 @@ void main() {
 #endif // !MODE_RENDER_DEPTH
 
 #if defined(USE_SHADOW_TO_OPACITY)
+#ifndef MODE_RENDER_DEPTH
 	alpha = min(alpha, clamp(length(ambient_light), 0.0, 1.0));
 
 #if defined(ALPHA_SCISSOR_USED)
-	if (alpha < alpha_scissor) {
+	if (alpha < alpha_scissor_threshold) {
 		discard;
 	}
-#else
-#ifdef MODE_RENDER_DEPTH
-#ifdef USE_OPAQUE_PREPASS
-
-	if (alpha < opaque_prepass_threshold) {
-		discard;
-	}
-#endif // USE_OPAQUE_PREPASS
-#endif // MODE_RENDER_DEPTH
 #endif // !ALPHA_SCISSOR_USED
 
+#endif // !MODE_RENDER_DEPTH
 #endif // USE_SHADOW_TO_OPACITY
 
 #ifdef MODE_RENDER_DEPTH
@@ -1906,11 +1926,7 @@ void main() {
 	fog.xy = unpackHalf2x16(fog_rg);
 	fog.zw = unpackHalf2x16(fog_ba);
 
-#ifndef DISABLE_FOG
-	if (scene_data.fog_enabled) {
-		frag_color.rgb = mix(frag_color.rgb, fog.rgb, fog.a);
-	}
-#endif // !DISABLE_FOG
+	frag_color.rgb = mix(frag_color.rgb, fog.rgb, fog.a);
 #endif // !FOG_DISABLED
 
 	// Tonemap before writing as we are writing to an sRGB framebuffer
@@ -1920,13 +1936,6 @@ void main() {
 #endif
 	frag_color.rgb = linear_to_srgb(frag_color.rgb);
 
-#ifdef USE_BCS
-	frag_color.rgb = apply_bcs(frag_color.rgb, bcs);
-#endif
-
-#ifdef USE_COLOR_CORRECTION
-	frag_color.rgb = apply_color_correction(frag_color.rgb, color_correction);
-#endif
 #else // !BASE_PASS
 	frag_color = vec4(0.0, 0.0, 0.0, alpha);
 #endif // !BASE_PASS
@@ -2124,11 +2133,7 @@ void main() {
 	fog.xy = unpackHalf2x16(fog_rg);
 	fog.zw = unpackHalf2x16(fog_ba);
 
-#ifndef DISABLE_FOG
-	if (scene_data.fog_enabled) {
-		additive_light_color *= (1.0 - fog.a);
-	}
-#endif // !DISABLE_FOG
+	additive_light_color *= (1.0 - fog.a);
 #endif // !FOG_DISABLED
 
 	// Tonemap before writing as we are writing to an sRGB framebuffer
@@ -2138,19 +2143,14 @@ void main() {
 #endif
 	additive_light_color = linear_to_srgb(additive_light_color);
 
-#ifdef USE_BCS
-	additive_light_color = apply_bcs(additive_light_color, bcs);
-#endif
-
-#ifdef USE_COLOR_CORRECTION
-	additive_light_color = apply_color_correction(additive_light_color, color_correction);
-#endif
-
 	frag_color.rgb += additive_light_color;
 #endif // USE_ADDITIVE_LIGHTING
-
 	frag_color.rgb *= scene_data.luminance_multiplier;
 
 #endif // !RENDER_MATERIAL
 #endif // !MODE_RENDER_DEPTH
+
+#ifdef PREMUL_ALPHA_USED
+	frag_color.rgb *= premul_alpha;
+#endif // PREMUL_ALPHA_USED
 }

@@ -114,6 +114,9 @@ private:
 	bool _save_text_editor_theme(const String &p_file);
 	bool _is_default_text_editor_theme(const String &p_theme_name);
 	const String _get_project_metadata_path() const;
+#ifndef DISABLE_DEPRECATED
+	void _remove_deprecated_settings();
+#endif
 
 protected:
 	static void _bind_methods();
@@ -124,6 +127,8 @@ public:
 	};
 
 	static EditorSettings *get_singleton();
+	static String get_existing_settings_path();
+	static String get_newest_settings_path();
 
 	static void create();
 	void setup_language();

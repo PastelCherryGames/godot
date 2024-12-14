@@ -958,6 +958,8 @@ void RendererSceneCull::instance_set_blend_shape_weight(RID p_instance, int p_sh
 	if (instance->mesh_instance.is_valid()) {
 		RSG::mesh_storage->mesh_instance_set_blend_shape_weight(instance->mesh_instance, p_shape, p_weight);
 	}
+
+	_instance_queue_update(instance, false, false);
 }
 
 void RendererSceneCull::instance_set_surface_override_material(RID p_instance, int p_surface, RID p_material) {
@@ -1634,6 +1636,8 @@ void RendererSceneCull::_update_instance(Instance *p_instance) {
 		if (p_instance->scenario) {
 			RendererSceneOcclusionCull::get_singleton()->scenario_set_instance(p_instance->scenario->self, p_instance->self, p_instance->base, p_instance->transform, p_instance->visible);
 		}
+	} else if (p_instance->base_type == RS::INSTANCE_NONE) {
+		return;
 	}
 
 	if (!p_instance->aabb.has_surface()) {
@@ -3087,7 +3091,7 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
 		Vector<Instance *> lights_with_shadow;
 
 		for (Instance *E : scenario->directional_lights) {
-			if (!E->visible) {
+			if (!E->visible || !(E->layer_mask & p_visible_layers)) {
 				continue;
 			}
 

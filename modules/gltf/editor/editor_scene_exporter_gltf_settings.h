@@ -42,6 +42,7 @@ class EditorSceneExporterGLTFSettings : public RefCounted {
 	HashMap<String, Ref<GLTFDocumentExtension>> _config_name_to_extension_map;
 
 	String _copyright;
+	double _bake_fps = 30.0;
 
 protected:
 	static void _bind_methods();
@@ -54,10 +55,13 @@ protected:
 	bool _get_extension_setting(const String &p_name_str, Variant &r_ret) const;
 
 public:
-	void generate_property_list(Ref<GLTFDocument> p_document);
+	void generate_property_list(Ref<GLTFDocument> p_document, Node *p_root = nullptr);
 
 	String get_copyright() const;
 	void set_copyright(const String &p_copyright);
+
+	double get_bake_fps() const;
+	void set_bake_fps(const double p_bake_fps);
 };
 
 #endif // TOOLS_ENABLED
